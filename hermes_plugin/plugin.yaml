@@ -1,7 +1,9 @@
 name: hermes-utcp
-version: "1.0.0"
+version: "1.1.0"
 description: "UTCP integration bridge — discovers and invokes operational tools via the UTCP Python client."
 author: "MiniOps POC"
+# Informational only (Hermes catalog / activation summary). The actual tools are
+# discovered from the UTCP manual at load time; these are the fallback set.
 provides_tools:
   - get_service_status
   - get_recent_events

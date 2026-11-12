@@ -1,25 +1,30 @@
 """UTCP bridge handlers for Hermes Agent.
 
-Exposes handlers for `get_service_status` and `get_recent_events` that discover
-and invoke the underlying endpoints via the UTCP Python client, observed via Langfuse.
+Every discovered tool gets a handler built by ``make_handler`` that invokes the
+underlying endpoint through the UTCP Python client, observed via Langfuse.
 """
 
-import asyncio
 import json
 import logging
 import os
-from typing import Any, Dict, Optional
+import threading
+from typing import Any, Awaitable, Callable, Dict, Optional
+
 from langfuse import observe
 from utcp.utcp_client import UtcpClient
 from utcp_http.http_call_template import HttpCallTemplate
 
+from .discovery import manual_url
 
 logger = logging.getLogger("hermes.plugins.utcp")
 
-# Configurable UTCP manual URL
-DEFAULT_MANUAL_URL = "http://127.0.0.1:8000/utcp"
+MANUAL_NAME = "demo_api"
+
+# One process-wide client. utcp_http opens a fresh aiohttp session per request, so the
+# client is safe to reuse across the fresh event loops Hermes may run handlers in.
+# A threading.Lock (not asyncio.Lock) guards the slot, because asyncio locks bind to one loop.
+_cache_lock = threading.Lock()
 _utcp_client: Optional[UtcpClient] = None
-_client_lock = asyncio.Lock()
 
 
 def get_active_llm_info() -> Dict[str, str]:
@@ -29,95 +34,70 @@ def get_active_llm_info() -> Dict[str, str]:
     return {"provider": provider, "model": model}
 
 
-async def get_or_create_utcp_client(manual_url: Optional[str] = None) -> UtcpClient:
-    """Lazily initialize and register the UTCP manual template."""
+def reset_client_cache() -> None:
     global _utcp_client
-    if _utcp_client is not None:
-        return _utcp_client
+    with _cache_lock:
+        _utcp_client = None
 
-    async with _client_lock:
+
+async def get_or_create_utcp_client(url: Optional[str] = None) -> UtcpClient:
+    """Return the shared UTCP client, registering the manual on first use.
+
+    A failed registration (e.g. the demo API isn't up yet) is never cached, so the
+    next call retries instead of failing with "Tool not found" for the process lifetime.
+    """
+    global _utcp_client
+    with _cache_lock:
         if _utcp_client is not None:
             return _utcp_client
 
-        url = manual_url or os.getenv("UTCP_MANUAL_URL", DEFAULT_MANUAL_URL)
-        client = await UtcpClient.create()
-        template = HttpCallTemplate(
-            name="demo_api",
-            call_template_type="http",
-            url=url,
-            http_method="GET",
-        )
-        await client.register_manual(template)
-        _utcp_client = client
+    client = await UtcpClient.create()
+    template = HttpCallTemplate(
+        name=MANUAL_NAME,
+        call_template_type="http",
+        url=url or manual_url(),
+        http_method="GET",
+    )
+    result = await client.register_manual(template)
+    if not result.success:
+        await client.close()
+        raise RuntimeError(f"UTCP manual registration failed: {result.errors}")
+
+    with _cache_lock:
+        if _utcp_client is None:
+            _utcp_client = client
         return _utcp_client
 
 
-@observe(name="get_service_status")
-async def handle_get_service_status(params: Optional[Dict[str, Any]] = None, **kwargs) -> str:
-    """Retrieve demo service status via UTCP."""
+async def call_utcp_tool(tool_name: str, params: Optional[Dict[str, Any]] = None) -> str:
+    """Invoke a UTCP tool by its unprefixed name and return a JSON string for the LLM."""
     llm_info = get_active_llm_info()
-    logger.debug(f"Executing get_service_status under provider={llm_info['provider']} model={llm_info['model']}")
+    logger.debug("Executing %s under provider=%s model=%s", tool_name, llm_info["provider"], llm_info["model"])
     try:
         client = await get_or_create_utcp_client()
-        result = await client.call_tool("demo_api.get_service_status", params or {})
+        result = await client.call_tool(f"{MANUAL_NAME}.{tool_name}", params or {})
         return json.dumps(result)
     except Exception as exc:
-        logger.error(f"Error executing get_service_status via UTCP: {exc}")
+        logger.error("Error executing %s via UTCP: %s", tool_name, exc)
         return json.dumps({
             "error": True,
             "message": str(exc),
-            "tool": "get_service_status",
+            "tool": tool_name,
             "provider": llm_info["provider"],
         })
 
 
-@observe(name="get_recent_events")
-async def handle_get_recent_events(params: Optional[Dict[str, Any]] = None, **kwargs) -> str:
-    """Retrieve recent application events via UTCP."""
-    llm_info = get_active_llm_info()
-    logger.debug(f"Executing get_recent_events under provider={llm_info['provider']} model={llm_info['model']}")
-    try:
-        client = await get_or_create_utcp_client()
-        result = await client.call_tool("demo_api.get_recent_events", params or {})
-        return json.dumps(result)
-    except Exception as exc:
-        logger.error(f"Error executing get_recent_events via UTCP: {exc}")
-        return json.dumps({
-            "error": True,
-            "message": str(exc),
-            "tool": "get_recent_events",
-            "provider": llm_info["provider"],
-        })
+def make_handler(tool_name: str) -> Callable[..., Awaitable[str]]:
+    """Build a Langfuse-observed async Hermes handler for one UTCP tool."""
+
+    @observe(name=tool_name)
+    async def handler(args: Optional[Dict[str, Any]] = None, **kwargs) -> str:
+        return await call_utcp_tool(tool_name, args)
+
+    handler.__name__ = f"handle_{tool_name}"
+    return handler
 
 
-# Synchronous entrypoint bridge if Hermes calls synchronously
-def sync_handle_get_service_status(params: Optional[Dict[str, Any]] = None, **kwargs) -> str:
-    """Synchronous bridge for handle_get_service_status."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(asyncio.run, handle_get_service_status(params, **kwargs))
-            return future.result()
-    else:
-        return asyncio.run(handle_get_service_status(params, **kwargs))
-
-
-def sync_handle_get_recent_events(params: Optional[Dict[str, Any]] = None, **kwargs) -> str:
-    """Synchronous bridge for handle_get_recent_events."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(asyncio.run, handle_get_recent_events(params, **kwargs))
-            return future.result()
-    else:
-        return asyncio.run(handle_get_recent_events(params, **kwargs))
+# Named handlers for the known demo tools (kept for direct use and tests).
+handle_get_service_status = make_handler("get_service_status")
+handle_get_recent_events = make_handler("get_recent_events")

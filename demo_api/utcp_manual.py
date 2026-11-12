@@ -36,7 +36,17 @@ def build_utcp_manual(base_url: str = "http://127.0.0.1:8000") -> UtcpManual:
     events_tool = Tool(
         name="get_recent_events",
         description="Retrieve a list of recent application events such as service restarts or configuration changes.",
-        inputs={"type": "object", "properties": {}},
+        inputs={
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of most recent events to return.",
+                    "minimum": 1,
+                }
+            },
+            "required": [],
+        },
         outputs={
             "type": "object",
             "properties": {

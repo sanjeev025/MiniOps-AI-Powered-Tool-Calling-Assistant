@@ -1,5 +1,5 @@
 from typing import List
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 
@@ -15,12 +15,15 @@ class RecentEventsResponse(BaseModel):
     events: List[EventItem] = Field(..., description="List of recent events")
 
 
+_EVENTS = [
+    EventItem(event="Application restarted", time="10:30 AM"),
+    EventItem(event="Configuration updated", time="11:15 AM"),
+]
+
+
 @router.get("/events", response_model=RecentEventsResponse)
-def get_recent_events() -> RecentEventsResponse:
-    """Retrieve recent application events."""
-    return RecentEventsResponse(
-        events=[
-            EventItem(event="Application restarted", time="10:30 AM"),
-            EventItem(event="Configuration updated", time="11:15 AM"),
-        ]
-    )
+def get_recent_events(
+    limit: int = Query(10, ge=1, description="Maximum number of most recent events to return."),
+) -> RecentEventsResponse:
+    """Retrieve recent application events, oldest first."""
+    return RecentEventsResponse(events=_EVENTS[-limit:])

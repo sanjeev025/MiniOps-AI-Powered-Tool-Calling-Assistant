@@ -33,6 +33,13 @@ def test_events_endpoint(client):
     assert data["events"][1]["time"] == "11:15 AM"
 
 
+def test_events_limit(client):
+    """GET /api/events?limit=1 returns only the most recent event."""
+    data = client.get("/api/events", params={"limit": 1}).json()
+    assert [e["event"] for e in data["events"]] == ["Configuration updated"]
+    assert client.get("/api/events", params={"limit": 0}).status_code == 422
+
+
 def test_utcp_manual_endpoint(client):
     """GET /utcp returns a valid UTCP manual containing both operational tools."""
     response = client.get("/utcp")

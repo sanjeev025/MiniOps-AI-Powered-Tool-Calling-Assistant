@@ -1,31 +1,32 @@
 """Hermes Agent UTCP Plugin entrypoint.
 
-Registers custom operational tools (get_service_status, get_recent_events)
-with the Hermes runtime context.
+Discovers tools from the live UTCP manual (``UTCP_MANUAL_URL``) and registers each one
+with the Hermes runtime. Adding an endpoint to the manual is enough to expose it to the
+agent; no plugin changes needed.
 """
 
-from .schemas import GET_SERVICE_STATUS_SCHEMA, GET_RECENT_EVENTS_SCHEMA
-from .tools import handle_get_service_status, handle_get_recent_events
+from .discovery import discover_tools
+from .tools import make_handler
+
+TOOLSET = "demo_ops"
+
+_TAG_EMOJI = {"status": "🔍", "health": "🔍", "events": "📋", "audit": "📋"}
+
+
+def _emoji_for(tags):
+    return next((_TAG_EMOJI[t] for t in tags if t in _TAG_EMOJI), "🔧")
 
 
 def register(ctx):
-    """Register UTCP operational tools with Hermes Agent."""
-    ctx.register_tool(
-        name="get_service_status",
-        toolset="demo_ops",
-        schema=GET_SERVICE_STATUS_SCHEMA,
-        handler=handle_get_service_status,
-        is_async=True,
-        description="Retrieve the current operational health, version, and uptime of the demo API service.",
-        emoji="🔍",
-    )
-
-    ctx.register_tool(
-        name="get_recent_events",
-        toolset="demo_ops",
-        schema=GET_RECENT_EVENTS_SCHEMA,
-        handler=handle_get_recent_events,
-        is_async=True,
-        description="Retrieve a list of recent application events such as service restarts or configuration updates.",
-        emoji="📋",
-    )
+    """Register every tool from the UTCP manual with Hermes Agent."""
+    for tool in discover_tools():
+        schema = {k: tool[k] for k in ("name", "description", "parameters")}
+        ctx.register_tool(
+            name=tool["name"],
+            toolset=TOOLSET,
+            schema=schema,
+            handler=make_handler(tool["name"]),
+            is_async=True,
+            description=tool["description"],
+            emoji=_emoji_for(tool["tags"]),
+        )

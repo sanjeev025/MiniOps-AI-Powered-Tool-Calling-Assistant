@@ -1,4 +1,8 @@
+import os
+import subprocess
+
 import pytest
+from config.export_env import render
 from config.settings import Settings
 from hermes_plugin.tools import get_active_llm_info
 
@@ -27,7 +31,8 @@ def test_groq_settings(monkeypatch):
     assert env_vars["HERMES_INFERENCE_PROVIDER"] == "custom"
     assert env_vars["OPENAI_BASE_URL"] == "https://api.groq.com/openai/v1"
     assert env_vars["OPENAI_API_KEY"] == "gsk_test_key_123"
-    assert env_vars["HERMES_MODEL"] == "openai/gpt-oss-120b"
+    # Configured model is used as-is (default here), never silently swapped
+    assert env_vars["HERMES_MODEL"] == "gpt-4o-mini"
 
 
 def test_groq_custom_model_settings(monkeypatch):
@@ -89,3 +94,47 @@ def test_plugin_get_active_llm_info(monkeypatch):
     info = get_active_llm_info()
     assert info["provider"] == "groq"
     assert info["model"] == "llama-3.3-70b-versatile"
+
+
+def test_groq_keeps_configured_llama_model(monkeypatch):
+    """llama-3.3-70b-versatile (recommended in older docs) is no longer swapped out."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("LLM_MODEL", "llama-3.3-70b-versatile")
+    cfg = Settings(_env_file=None)
+    assert cfg.hermes_env_vars["HERMES_MODEL"] == "llama-3.3-70b-versatile"
+    assert "llama-3.3-70b-versatile" in cfg.hermes_cli_args
+
+
+def test_cli_args_never_contain_secrets(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_secret_value")
+    cfg = Settings(_env_file=None)
+    args = cfg.hermes_cli_args
+    assert "--api-key" not in args
+    assert "gsk_secret_value" not in args
+    assert args[:2] == ["--provider", "custom"]
+    assert args[args.index("--base-url") + 1] == "https://api.groq.com/openai/v1"
+
+
+def test_utcp_manual_url_exported(monkeypatch):
+    monkeypatch.setenv("DEMO_API_PORT", "9123")
+    cfg = Settings(_env_file=None)
+    assert cfg.hermes_env_vars["UTCP_MANUAL_URL"] == "http://127.0.0.1:9123/utcp"
+
+    monkeypatch.setenv("UTCP_MANUAL_URL", "http://ops.internal/utcp")
+    assert Settings(_env_file=None).hermes_env_vars["UTCP_MANUAL_URL"] == "http://ops.internal/utcp"
+
+
+def test_export_env_roundtrips_through_bash(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("LLM_MODEL", "openai/gpt-oss-20b")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_with'quote $x")
+    script = render(Settings(_env_file=None)) + (
+        '\nprintf "%s|%s|%s\\n" "$HERMES_MODEL" "$OPENAI_API_KEY" "${HERMES_CLI_ARGS[*]}"'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                         env={"PATH": os.environ["PATH"]}, check=True).stdout.strip()
+    model, key, args = out.split("|")
+    assert model == "openai/gpt-oss-20b"
+    assert key == "gsk_with'quote $x"
+    assert args == "--provider custom -m openai/gpt-oss-20b --base-url https://api.groq.com/openai/v1"
